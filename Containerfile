@@ -15,6 +15,11 @@ RUN apt-get update && apt-get install -y libcrypt-dev && \
     rm -rf /var/lib/apt/lists/*
 USER $MAMBA_USER
 
+# torchdrug compiles C++ extensions on import and needs somewhere to write them. The rootfs
+# is read-only by design, so point it at the tmpfs the runner mounts.
+ENV TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
+ENV HOME=/tmp
+
 WORKDIR /work
 COPY --chown=$MAMBA_USER:$MAMBA_USER . /work
 
