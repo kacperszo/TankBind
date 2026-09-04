@@ -119,35 +119,52 @@ def main() -> int:
     RDLogger.DisableLog("rdApp.*")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-    ligands = sorted(Path(args.sdf_dir).glob("*/*_ligand.sdf"))[: args.limit]
-    if not ligands:
-        raise SystemExit(f"no ligands under {args.sdf_dir}")
+    # Read ligands exactly as production does. This matters more than it looks: production
+    # tries the mol2 first and only falls back to the sdf, and the two give different SMILES
+    # on round-trip. Reading the sdf alone yields explicit-hydrogen SMILES that torchdrug's
+    # parser rejects for 11 of 25 core-set ligands — which looks like a property of TankBind
+    # and is really a property of how the comparison loaded the file.
+    from embed_complexes import read_ligand
+
+    complexes = sorted(d for d in Path(args.sdf_dir).iterdir() if d.is_dir())[: args.limit]
+    if not complexes:
+        raise SystemExit(f"no complexes under {args.sdf_dir}")
 
     ok = bad = skipped = 0
-    for lig in ligands:
-        mol = None
-        for sanitize in (True, False):
-            mols = [m for m in Chem.SDMolSupplier(str(lig), sanitize=sanitize) if m is not None]
-            if mols:
-                mol = mols[0]
-                break
-        if mol is None:
+    rejected: list[str] = []
+    for lig in complexes:
+        try:
+            mol = read_ligand(str(lig), lig.name)
+        except Exception:
             skipped += 1
             continue
-        ref = torchdrug_features(mol)
+        try:
+            ref = torchdrug_features(mol)
+        except Exception as e:
+            # torchdrug rejects some PDBbind ligands outright — 1a30's carboxylates round-trip
+            # through SMILES as [C-](=O)=O, which its parser refuses. Production drops those
+            # complexes too, so they are counted, not treated as a failure of the replacement.
+            rejected.append(f"{lig.name}: {type(e).__name__}")
+            continue
         try:
             got = replacement_features(mol)
         except ImportError as e:
             raise SystemExit(f"replacement not importable: {e}")
+        except Exception as e:
+            print(f"  {lig.name}: replacement raised {type(e).__name__}: {e}")
+            bad += 1
+            continue
         names = ["node_feature", "edge_list", "edge_weight", "edge_feature"]
         if all(compare(n, r, g) for n, r, g in zip(names, ref, got)):
             ok += 1
         else:
-            print(f"  {lig.parent.name}: DIVERGES")
+            print(f"  {lig.name}: DIVERGES")
             bad += 1
 
-    print(f"\n{ok} identical, {bad} divergent, {skipped} unreadable "
-          f"(of {len(ligands)} ligands)")
+    print(f"\n{ok} identical, {bad} divergent, {skipped} unreadable, "
+          f"{len(rejected)} rejected by torchdrug itself (of {len(complexes)} complexes)")
+    if rejected:
+        print(f"  torchdrug rejected: {', '.join(rejected[:6])}")
     return 0 if bad == 0 else 1
 
 
