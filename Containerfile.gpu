@@ -73,6 +73,17 @@ RUN pip install --no-cache-dir --no-deps --ignore-requires-python \
         "numpy<2" \
         pandas scipy tqdm
 
+# torchdrug 0.1.2 predates torch 2.0 in exactly one place: patch.py checks
+# `isinstance(name, torch._six.string_classes)`, and torch._six was removed in 2.0, so
+# `import torchdrug` dies with `module 'torch' has no attribute '_six'`. In torch 1.x
+# `string_classes` was defined as `(str, bytes)`, so this substitution is that definition
+# inlined — not a behaviour change. Done with sed rather than a sitecustomize shim so the
+# fix is visible in the image and costs nothing at interpreter startup.
+RUN sed -i 's/torch\._six\.string_classes/(str, bytes)/' \
+        /opt/conda/lib/python3.10/site-packages/torchdrug/patch.py \
+    && grep -q "(str, bytes)" /opt/conda/lib/python3.10/site-packages/torchdrug/patch.py \
+    && python -c "import torchdrug; print('torchdrug imports on torch 2.x')"
+
 # crypt.h is included by Python.h but absent from conda's headers; torchdrug's C++ extension
 # will not compile without it. The CPU tier needed the same symlink at python3.8.
 RUN apt-get update && apt-get install -y --no-install-recommends libcrypt-dev g++ \
