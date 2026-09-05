@@ -24,6 +24,10 @@ from __future__ import annotations
 
 import numpy as np
 from rdkit import Chem
+# Imported explicitly, not reached through Chem: rdDepictor is a submodule that only
+# appears as `Chem.rdDepictor` once something has imported it. torchdrug used to do
+# that incidentally, so dropping torchdrug removed the import this depended on.
+from rdkit.Chem import rdDepictor
 
 # --- vocabularies, verbatim from torchdrug.data.feature -----------------------------------
 ATOM_VOCAB = ["H", "B", "C", "N", "O", "F", "Mg", "Si", "P", "S",
@@ -87,7 +91,7 @@ def bond_length(bond: Chem.Bond) -> list[float]:
     """
     mol = bond.GetOwningMol()
     if mol.GetNumConformers() == 0:
-        Chem.rdDepictor.Compute2DCoords(mol)
+        rdDepictor.Compute2DCoords(mol)
     conf = mol.GetConformer()
     h = conf.GetAtomPosition(bond.GetBeginAtomIdx())
     t = conf.GetAtomPosition(bond.GetEndAtomIdx())

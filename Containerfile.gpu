@@ -1,31 +1,34 @@
-# TankBind on the GPU — the one model here that cannot simply be given a CUDA wheel.
+# TankBind on the GPU — the one model here that could not simply be given a CUDA wheel.
 #
 # The CPU tier pins pytorch 1.13.1 and python 3.8 because torchdrug 0.1.2 does. torch 1.13's
 # cu117 build predates Ada and ships no sm_89 kernels, so on the local RTX 4060 Ti it does not
-# run at all — this is a port, not a rebuild.
+# run at all — this was a port, not a rebuild.
 #
-# What moves and why:
-#   python 3.8 -> 3.10    3.8 is EOL and torchdrug 0.2.x publishes nothing for it
+# What moved:
+#   python 3.8 -> 3.10              3.8 is EOL
 #   pytorch 1.13.1 -> 2.1.2+cu121   first line with native sm_86 and sm_89 support
-#   torchdrug 0.1.2 -> 0.2.1        0.1.2 hard-pins the old torch; 0.2.1 accepts 2.x
 #   pyg 2.1.0 -> 2.5.x              2.1.0 has no wheels for torch 2.1
+#   torchdrug -> removed entirely   see below
 #
-# torchdrug is the reason the pins were welded together: `feature_utils.py` builds the ligand
-# features through `torchdrug.data`, so it sits on the embedding path and cannot be dropped.
-# That makes the reproduction gate mandatory rather than a formality — the recorded embedding
-# probe is R=0.762, and if 0.2.1 changed how it builds molecule features, the number moves and
-# this image is wrong no matter how cleanly it builds.
+# torchdrug was what welded the old pins together: `feature_utils.py` built the ligand
+# features through `torchdrug.data`, so it sat on the embedding path. It is now gone —
+# `tankbind_features.py` reimplements its two feature functions in RDKit, and GATv2/GINv2
+# use torch's own scatter and sparse ops. Verified bit-identical: `compare_featurizer.py`
+# matches its arrays on 30 core-set complexes, and full embeddings agree to max|Δ| = 0.
+#
+# RDKit still needs pinning even so — see the note on the install below.
 FROM docker.io/mambaorg/micromamba:1.5.8
 
 USER root
 ENV PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1 MPLBACKEND=Agg
 
 RUN micromamba install -y -n base -c conda-forge \
-        # rdkit pinned to the reference tier's version, not left to float: torchdrug builds
-        # its bond stereo one-hot from len(Chem.BondStereo.values), which went from 6 to 8
-        # between RDKit generations. 2022.09.5 yields 19-dimensional bond features and
-        # 2024.03.5 yields 21 — both are shapes the adapter accepts, so a mismatch here would
-        # not error, it would quietly featurise differently from the recorded run.
+        # rdkit pinned to the reference tier's version, not left to float. The bond stereo
+        # one-hot is sized by len(Chem.BondStereo.values), which went from 6 to 8 between
+        # RDKit generations: 2022.09.5 yields 19-dimensional bond features and 2024.03.5
+        # yields 21. Both are shapes the adapter accepts, so a mismatch would not error — it
+        # would quietly featurise differently from the recorded run. The reimplementation
+        # inherits this from RDKit exactly as torchdrug did.
         python=3.10 "rdkit=2024.03.5" biopython freesasa h5py python-lmdb \
         # mkl 2024.1 dropped the iJIT_NotifyEvent symbol and breaks `import torch`; the CPU
         # tier hit this too and the constraint survives the version bump
@@ -37,10 +40,10 @@ ENV LD_LIBRARY_PATH=/opt/conda/lib
 
 RUN pip install --no-cache-dir torch==2.1.2
 
-# setuptools<81 is load-bearing: torch 2.1.2's cpp_extension.py still does
-# `from pkg_resources import packaging`, setuptools 81 removed pkg_resources, and
-# torchdrug imports cpp_extension at import time — so a current setuptools makes
-# `import torchdrug` fail outright with a message naming neither.
+# setuptools<81 guards torch 2.1.2's cpp_extension.py, which still does
+# `from pkg_resources import packaging`; setuptools 81 removed pkg_resources. Nothing here
+# compiles an extension any more now that torchdrug is gone, so this is defensive rather
+# than load-bearing — but anything importing torch.utils.cpp_extension would hit it.
 RUN pip install --no-cache-dir "setuptools<81" wheel
 
 RUN pip install --no-cache-dir "torch_geometric<2.6" \
@@ -55,70 +58,29 @@ d = os.path.dirname(torch_scatter.__file__); \
 assert glob.glob(os.path.join(d, '_scatter_cuda*')), 'torch_scatter has no CUDA extension'; \
 print('torch_scatter CUDA extension present')"
 
-# torchdrug stays at 0.1.2, the version the reference tier uses. 0.2.1 is NOT a drop-in:
-# it produces 18-dimensional bond features and 67-dimensional atom features where 0.1.2 gives
-# 21 and 70, so the embeddings would be computed on a different feature space entirely. The
-# adapter's shape guard caught this rather than letting it through.
-#
-# 0.1.2 is not on PyPI for python 3.10 and its metadata says python_requires <3.9, but that
-# bound is conservative — the package runs fine here on 3.10 with torch 2.1.2, which is why
-# --ignore-requires-python is used rather than pinning python back to 3.8. --no-deps because
-# its pins would drag torch back to 1.x; its actual runtime needs are listed below.
-RUN pip install --no-cache-dir --no-deps --ignore-requires-python \
-        "https://github.com/DeepGraphLearning/torchdrug/archive/refs/tags/v0.1.2.tar.gz" \
-    && pip install --no-cache-dir \
-        decorator easydict jinja2 pyyaml networkx matplotlib \
+# No torchdrug. It used to be here for one call — `td.Molecule.from_smiles(...)` in
+# feature_utils — plus two readouts and an MLP. All four are reimplemented in
+# `tankbind_features.py` and in GATv2/GINv2 directly, verified to produce bit-identical
+# embeddings. Removing it also removes everything it dragged along: a C++ toolchain, a
+# crypt.h symlink into conda's headers, a sed patch for `torch._six`, ninja, and a
+# pre-warmed JIT extension.
+RUN pip install --no-cache-dir \
         "atom3d==0.2.6" \
         "torchmetrics==1.5.2" \
         "numpy<2" \
         pandas scipy tqdm
 
-# torchdrug 0.1.2 predates torch 2.0 in exactly one place: patch.py checks
-# `isinstance(name, torch._six.string_classes)`, and torch._six was removed in 2.0, so
-# `import torchdrug` dies with `module 'torch' has no attribute '_six'`. In torch 1.x
-# `string_classes` was defined as `(str, bytes)`, so this substitution is that definition
-# inlined — not a behaviour change. Done with sed rather than a sitecustomize shim so the
-# fix is visible in the image and costs nothing at interpreter startup.
-RUN sed -i 's/torch\._six\.string_classes/(str, bytes)/' \
-        /opt/conda/lib/python3.10/site-packages/torchdrug/patch.py \
-    && grep -q "(str, bytes)" /opt/conda/lib/python3.10/site-packages/torchdrug/patch.py \
-    && python -c "import torchdrug; print('torchdrug imports on torch 2.x')"
-
-# crypt.h is included by Python.h but absent from conda's headers; torchdrug's C++ extension
-# will not compile without it. The CPU tier needed the same symlink at python3.8.
-RUN apt-get update && apt-get install -y --no-install-recommends libcrypt-dev g++ \
-    && ln -sf /usr/include/crypt.h /opt/conda/include/python3.10/crypt.h \
-    && rm -rf /var/lib/apt/lists/*
-
-# torchdrug JIT-compiles `sparse_coo_tensor_unsafe` with torch's cpp_extension, which shells
-# out to `c++` and drives it through ninja. The base image has neither, and the failure is a
-# bare `Command '['which', 'c++']' returned non-zero exit status 1`. The CPU tier got these
-# from gxx_linux-64 and ninja in environment.yml; they are installed as their own layer here
-# so the multi-gigabyte torch layer above stays cached.
-# ninja from conda, but the compiler from apt: conda's gxx_linux-64 installs itself as
-# `x86_64-conda-linux-gnu-c++` and torch's cpp_extension looks for a literal `c++` on PATH,
-# so the conda package alone still fails `which c++`.
-RUN micromamba install -y -n base -c conda-forge ninja \
-    && micromamba clean --all --yes
-
-# torchdrug JIT-compiles extensions on import and needs a writable directory; the runner
-# mounts the rootfs read-only, so both of these point at the tmpfs it provides.
-ENV TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
-ENV HOME=/tmp
-
-# Assert the feature dimensions here, not just that the imports resolve: the whole risk in
-# this port is a silently different feature space, and it is one line to rule out.
-RUN python -c "import torch, torch_geometric, torchdrug, atom3d; \
-from torchdrug import data as td; from rdkit import Chem; \
-g = td.Molecule.from_smiles('CCO', node_feature='property_prediction'); \
-b, a = g.edge_feature.shape[-1], g.node_feature.shape[-1]; \
-assert (b, a) == (21, 56), f'features are {b}/{a}, reference tier is 21/56'; \
-print('env ok', torch.__version__, 'pyg', torch_geometric.__version__, \
-'torchdrug', torchdrug.__version__, 'cuda', torch.version.cuda, 'features', b, a)"
-
 WORKDIR /work
 COPY . /work
 
-# Pre-warm the same extension the CPU tier does, so a run does not stall compiling it.
-RUN python -c "import torch; from torchdrug import utils; \
-utils.sparse_coo_tensor(torch.zeros(2,1,dtype=torch.long), torch.ones(1), (2,2))"
+# Assert the feature dimensions, not just that the imports resolve: the whole risk in this
+# port is a silently different feature space. 21/56 is what torchdrug 0.1.2 produced and what
+# the published weights expect.
+RUN python -c "import torch, torch_geometric, atom3d, sys; sys.path.insert(0, '/work'); \
+from rdkit import Chem; from tankbind_features import molecule_features; \
+n, _e, _w, f = molecule_features('CCO'); \
+assert (f.shape[-1], n.shape[-1]) == (21, 56), f'features are {f.shape[-1]}/{n.shape[-1]}, expected 21/56'; \
+print('env ok', torch.__version__, 'pyg', torch_geometric.__version__, \
+'cuda', torch.version.cuda, 'features', f.shape[-1], n.shape[-1])"
+
+
