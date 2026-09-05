@@ -18,7 +18,7 @@ import scipy.spatial
 import requests
 from rdkit.Geometry import Point3D
 
-from torchdrug import data as td     # conda install torchdrug -c milagraph -c conda-forge -c pytorch -c pyg if fail to import
+from tankbind_features import molecule_features
 
 def read_mol(sdf_fileName, mol2_fileName, verbose=False):
     Chem.WrapLogs()
@@ -158,15 +158,19 @@ def extract_torchdrug_feature_from_mol(mol, has_LAS_mask=False):
     else:
         LAS_distance_constraint_mask = None
     pair_dis_distribution = get_compound_pair_dis_distribution(coords, LAS_distance_constraint_mask=LAS_distance_constraint_mask)
-    molstd = td.Molecule.from_smiles(Chem.MolToSmiles(mol),node_feature='property_prediction')
-    # molstd = td.Molecule.from_molecule(mol ,node_feature=['property_prediction'])
-    compound_node_features = molstd.node_feature # nodes_chemical_features
-    edge_list = molstd.edge_list # [num_edge, 3]
-    edge_weight = molstd.edge_weight # [num_edge, 1]
+    # torchdrug replaced by tankbind_features, which reimplements its two feature functions
+    # in plain RDKit. Verified array-for-array against torchdrug 0.1.2 on 30 core-set
+    # complexes (`compare_featurizer.py`), because a silently reordered column here would
+    # still produce the right shapes and plausible-looking embeddings.
+    node_feature, edge_list_np, edge_weight_np, edge_feature_np = molecule_features(
+        Chem.MolToSmiles(mol))
+    compound_node_features = torch.from_numpy(node_feature)
+    edge_list = torch.from_numpy(edge_list_np)
+    edge_weight = torch.from_numpy(edge_weight_np)
     assert edge_weight.max() == 1
     assert edge_weight.min() == 1
     assert coords.shape[0] == compound_node_features.shape[0]
-    edge_feature = molstd.edge_feature # [num_edge, edge_feature_dim]
+    edge_feature = torch.from_numpy(edge_feature_np)
     x = (coords, compound_node_features, edge_list, edge_feature, pair_dis_distribution)
     return x
 

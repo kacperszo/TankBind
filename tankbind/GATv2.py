@@ -6,8 +6,26 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils import checkpoint
 from torch_scatter import scatter_mean, scatter_add, scatter_max
-from torchdrug import data, utils, layers
+from torch_scatter import scatter_add, scatter_mean
 from collections.abc import Sequence
+
+class _ScatterReadout(nn.Module):
+    """torchdrug's SumReadout / MeanReadout, without torchdrug.
+
+    Both pool node features to one vector per graph using the graph index each node carries.
+    torchdrug spells that `graph.node2graph`; the same tensor is PyG's `batch`.
+    """
+
+    def __init__(self, kind: str):
+        super().__init__()
+        self.kind = kind
+
+    def forward(self, graph, input):
+        index = graph.node2graph if hasattr(graph, "node2graph") else graph.batch
+        n = int(getattr(graph, "batch_size", int(index.max()) + 1))
+        fn = scatter_add if self.kind == "sum" else scatter_mean
+        return fn(input, index, dim=0, dim_size=n)
+
 
 class GraphAttentionConv(nn.Module):
     """
@@ -169,10 +187,11 @@ class GAT(nn.Module):
             self.layers.append(GraphAttentionConv(self.dims[i], self.dims[i + 1], edge_input_dim, num_head,
                                                          negative_slope, batch_norm, activation))
 
-        if readout == "sum":
-            self.readout = layers.SumReadout()
-        elif readout == "mean":
-            self.readout = layers.MeanReadout()
+        # torchdrug's SumReadout/MeanReadout are a scatter over graph.node2graph and nothing
+        # else; `data` and `utils` were imported here but never used at all. Replacing them
+        # removes the last reason this file needs torchdrug.
+        if readout in ("sum", "mean"):
+            self.readout = _ScatterReadout(readout)
         else:
             raise ValueError("Unknown readout `%s`" % readout)
 

@@ -6,8 +6,52 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils import checkpoint
 from torch_scatter import scatter_mean, scatter_add, scatter_max
-from torchdrug import data, utils, layers
+from GATv2 import _ScatterReadout
 from collections.abc import Sequence
+
+
+class _MLP(nn.Module):
+    """torchdrug's `layers.MLP`, reimplemented so this file needs no torchdrug.
+
+    The module structure is kept identical (`self.layers` as a ModuleList of Linear), because
+    the published checkpoint addresses these parameters by name — `mlp.layers.0.weight` and so
+    on. A functionally equivalent MLP with different attribute names would simply fail to load.
+
+    Signature order matters too, and is the reason for the note at the call site: the third
+    positional argument is `short_cut`, not `activation`.
+    """
+
+    def __init__(self, input_dim, hidden_dims, short_cut=False, batch_norm=False,
+                 activation="relu", dropout=0):
+        super().__init__()
+        if not isinstance(hidden_dims, (list, tuple)):
+            hidden_dims = [hidden_dims]
+        self.dims = [input_dim] + list(hidden_dims)
+        self.short_cut = short_cut
+        self.activation = getattr(F, activation) if isinstance(activation, str) else activation
+        self.dropout = nn.Dropout(dropout) if dropout else None
+
+        self.layers = nn.ModuleList(
+            nn.Linear(self.dims[i], self.dims[i + 1]) for i in range(len(self.dims) - 1))
+        self.batch_norms = nn.ModuleList(
+            nn.BatchNorm1d(self.dims[i + 1]) for i in range(len(self.dims) - 2)
+        ) if batch_norm else None
+
+    def forward(self, input):
+        layer_input = input
+        for i, layer in enumerate(self.layers):
+            hidden = layer(layer_input)
+            if i < len(self.layers) - 1:
+                if self.batch_norms:
+                    x = hidden.flatten(0, -2)
+                    hidden = self.batch_norms[i](x).view_as(hidden)
+                hidden = self.activation(hidden)
+                if self.dropout:
+                    hidden = self.dropout(hidden)
+            if self.short_cut and hidden.shape == layer_input.shape:
+                hidden = hidden + layer_input
+            layer_input = hidden
+        return hidden
 
 
 class GraphIsomorphismConv(nn.Module):
@@ -54,7 +98,11 @@ class GraphIsomorphismConv(nn.Module):
 
         if hidden_dims is None:
             hidden_dims = []
-        self.mlp = layers.MLP(input_dim, list(hidden_dims) + [output_dim], activation)
+        # NOTE the third positional is `short_cut`, not `activation` — TankBind passes the
+        # activation there, so a string like "relu" lands as a truthy short_cut while the
+        # activation keeps its default. Reproduced deliberately: the published weights were
+        # trained with residual connections in this MLP.
+        self.mlp = _MLP(input_dim, list(hidden_dims) + [output_dim], activation)
         if edge_input_dim:
             self.edge_linear = nn.Linear(edge_input_dim, input_dim)
         else:
@@ -77,7 +125,9 @@ class GraphIsomorphismConv(nn.Module):
 
 
     def message_and_aggregate(self, edge_list, edge_weight, edge_feature, num_node, input):
-        adjacency = utils.sparse_coo_tensor(edge_list.t()[:2], edge_weight,
+        # torchdrug's sparse_coo_tensor is torch's with the index check skipped for speed;
+        # the resulting tensor is the same, and this drops a JIT-compiled C++ extension.
+        adjacency = torch.sparse_coo_tensor(edge_list.t()[:2], edge_weight,
                                             (num_node, num_node))
         update = torch.sparse.mm(adjacency.t().float(), input.float())
         if self.edge_linear:
@@ -154,10 +204,10 @@ class GIN(nn.Module):
             self.layers.append(GraphIsomorphismConv(self.dims[i], self.dims[i + 1], edge_input_dim,
                                                            layer_hidden_dims, eps, learn_eps, batch_norm, activation))
 
-        if readout == "sum":
-            self.readout = layers.SumReadout()
-        elif readout == "mean":
-            self.readout = layers.MeanReadout()
+        # same substitution as GATv2: torchdrug's readouts are a scatter over the per-node
+        # graph index, and `data`/`utils` were imported but unused.
+        if readout in ("sum", "mean"):
+            self.readout = _ScatterReadout(readout)
         else:
             raise ValueError("Unknown readout `%s`" % readout)
 
