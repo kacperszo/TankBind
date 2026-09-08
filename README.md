@@ -1,3 +1,38 @@
+<!-- gnn-benchmark:begin -->
+# Running this in gnn-benchmark
+
+What is used here is the **encoder** — a complex-level embedding, with the affinity head left
+off. **Use `tankbind.torch`**: torchdrug is gone, which is what welded python 3.8 and torch
+1.13 together.
+
+| variant | stack | `gnnb verify` on CASF-2016 |
+|---|---|---|
+| `tankbind.reference` | torch 1.13.1, torchdrug, python 3.8, CPU only | the golden's source |
+| `tankbind.torch` | torch 2.1.2+cu121, PyG 2.5.3, **no torchdrug** | 285/285, max abs diff 2.9e-06 |
+
+One image serves both processors: the cu121 build runs on the CPU when no device is passed.
+The reference tier declares no GPU image on purpose — torch 1.13's cu117 build has no sm_89
+kernels, and the image that does run on the card is this port, not that code with a CUDA wheel.
+
+`verify` compares embeddings here rather than predictions, against
+`reference/tankbind/casf2016_embeddings.npz`.
+
+```bash
+podman build --format=docker -f Containerfile.gpu -t tankbind-torch:latest .
+
+gnnb verify --variant tankbind.torch --dataset data/CASF-2016/coreset
+gnnb run --variant tankbind.torch --capability embed --dataset <complexes> --gpu
+```
+
+TankBind keeps protein and ligand separate and models the complex as their interaction, so
+"the complex embedding" is a choice rather than a layer output. The one used is the authors'
+own `readout_mode == 1` formula. Why, and what the trained `readout_mode=2` leaves behind, is
+in [CLAUDE.md](CLAUDE.md).
+
+<!-- gnn-benchmark:end -->
+
+---
+
 ![header](imgs/header.png)
 
 Source code for the *NeurIPS 2022* paper [TANKBind: Trigonometry-Aware Neural NetworKs for Drug-Protein Binding Structure Prediction](https://biorxiv.org/cgi/content/short/2022.06.06.495043v1)
