@@ -13,8 +13,23 @@ heavy-atom-count baseline of 0.470.
 
 `predict` is not registered — the affinity path was not pursued.
 
-Environment: `localhost/tankbind:latest`, micromamba base, CPU-only. `environment.yml` builds
-from scratch and every import the code makes at module level works inside the image.
+Two tiers, and the modern one is now the default place to run this:
+
+| variant | stack | check |
+|---|---|---|
+| `tankbind.reference` | torch 1.13.1, torchdrug, python 3.8, CPU only | the golden's source |
+| `tankbind.torch` | torch 2.1.2+cu121, pyg 2.5.3, **no torchdrug** | `verify` 285/285, max|Δ| 2.9e-06 |
+
+One image serves both processors: the cu121 build runs on the CPU when no device is passed,
+so the CPU tier costs nothing beyond a registry line. The reference tier declares no `gpu`
+image on purpose — torch 1.13's cu117 build has no sm_89 kernels, and the image that does run
+on the card is the torchdrug-free port, not this code with a CUDA wheel. Pointing `--gpu` at
+it would have swapped the implementation while the variant id stayed the same.
+
+`verify` compares embeddings here, not predictions: the golden is
+`reference/tankbind/casf2016_embeddings.npz`, and the harness compares per complex on the ids
+they share. That is what makes an embed-only model checkable at all — before it, a rewrite of
+the featuriser could have changed every vector with nothing to notice.
 
 ## Where the embedding comes from, and why it is not ours
 
