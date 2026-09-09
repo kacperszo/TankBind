@@ -83,4 +83,7 @@ assert (f.shape[-1], n.shape[-1]) == (21, 56), f'features are {f.shape[-1]}/{n.s
 print('env ok', torch.__version__, 'pyg', torch_geometric.__version__, \
 'cuda', torch.version.cuda, 'features', f.shape[-1], n.shape[-1])"
 
-
+# The encoder/head boundary. `linear` and `bias` were on the wrong side of it until
+# 2026-09-09, which nothing would have reported: one is an entire head for the other task and
+# the other is a single scalar.
+RUN python test_transfer.py

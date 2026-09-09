@@ -20,9 +20,14 @@ head does not use it — but it is the most defensible aggregation available.
 Every benchmark complex ships a bound ligand, so the pocket centre is the ligand centroid and
 the whole segmentation step falls away.
 
+**`--predict` writes the affinity head's output too.** TankBind has one — `affinity_pred`, the
+second return value of `forward` — and until a trainer existed there was nothing to do with it,
+so this script ignored it. Now that `train_complexes.py` fits that head, a run has to be able to
+score with what it produced, or training it is open-loop.
+
 usage:
     python embed_complexes.py --complexes /data --model /ckpt/self_dock.pt \
-        --out /outputs/embeddings.npz --workdir /outputs/work
+        --out /outputs/embeddings.npz --workdir /outputs/work [--predict /outputs/predictions.csv]
 """
 
 from __future__ import annotations
@@ -110,6 +115,8 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--workdir", required=True)
+    parser.add_argument("--predict", default=None,
+                        help="also write complex_id,y_pred here, from the affinity head")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
 
@@ -163,16 +170,27 @@ def main() -> None:
     handle = model.tranistion.register_forward_hook(lambda m, i, o: captured.append(o.detach()))
 
     loader = DataLoader(dataset, batch_size=1, shuffle=False, follow_batch=["x", "compound_pair"])
-    ids_out, vectors = [], []
+    ids_out, vectors, scores = [], [], []
     with torch.no_grad():
         for i, data in enumerate(tqdm(loader, desc="Embedding")):
             captured.clear()
-            model(data.to(device))
+            _y_pred, affinity_pred = model(data.to(device))
             z = captured[-1]  # last transition = last refinement round
             mask = torch.ones(z.shape[:3], device=z.device)
             vectors.append(pooled(z, mask).cpu().numpy())
+            scores.extend(affinity_pred.reshape(-1).cpu().tolist())
             ids_out.append(info.iloc[i]["protein_name"])
     handle.remove()
+
+    if args.predict:
+        import csv
+
+        os.makedirs(os.path.dirname(args.predict) or ".", exist_ok=True)
+        with open(args.predict, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["complex_id", "y_pred"])
+            writer.writerows(zip(ids_out, scores))
+        print(f"{len(scores)} affinities -> {args.predict}")
 
     matrix = np.concatenate(vectors, axis=0)
     np.savez(args.out, ids=np.array(ids_out), vectors=matrix)
