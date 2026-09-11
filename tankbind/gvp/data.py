@@ -5,7 +5,9 @@ import torch, math
 import torch.utils.data as data
 import torch.nn.functional as F
 import torch_geometric
-import torch_cluster
+# torch_cluster's knn_graph, in plain torch — see torch_ops.py. It was the last compiled
+# extension on this port's code path, and one that has no wheel for a current torch.
+from torch_ops import knn_graph
 
 def _normalize(tensor, dim=-1):
     '''
@@ -171,7 +173,7 @@ class ProteinGraphDataset(data.Dataset):
             coords[~mask] = np.inf
             
             X_ca = coords[:, 1]
-            edge_index = torch_cluster.knn_graph(X_ca, k=self.top_k)
+            edge_index = knn_graph(X_ca, k=self.top_k)
             
             pos_embeddings = self._positional_embeddings(edge_index)
             E_vectors = X_ca[edge_index[0]] - X_ca[edge_index[1]]

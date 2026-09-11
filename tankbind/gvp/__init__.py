@@ -2,7 +2,7 @@ import torch, functools
 from torch import nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
-from torch_scatter import scatter_add
+from torch_ops import scatter_add  # torch_geometric-backed; see torch_ops.py
 
 def tuple_sum(*args):
     '''

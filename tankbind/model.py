@@ -8,7 +8,6 @@ import sys
 import torch.nn as nn
 from gvp import GVP, GVPConvLayer, LayerNorm, tuple_index
 from torch.distributions import Categorical
-from torch_scatter import scatter_mean
 from GATv2 import GAT
 from GINv2 import GIN
 

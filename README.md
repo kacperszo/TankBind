@@ -29,6 +29,113 @@ TankBind keeps protein and ligand separate and models the complex as their inter
 own `readout_mode == 1` formula. Why, and what the trained `readout_mode=2` leaves behind, is
 in [CLAUDE.md](CLAUDE.md).
 
+## Running it without the harness
+
+This fork runs on its own; the benchmark adds bookkeeping, not capability. Every
+command below is generated from the adapter by `gnnb howto`, so it cannot drift from
+what the harness actually runs — regenerate with `python tools/sync_model_readmes.py`.
+
+All of them run with `--network=none` and a read-only root filesystem. Nothing is
+fetched at run time; dependencies are resolved when the image is built.
+
+### What it eats
+
+One directory per complex, named after it:
+
+    <complexes>/<id>/<id>_protein.pdb
+    <complexes>/<id>/<id>_ligand.sdf      # or .mol2; several models try both
+
+**p2rank is not needed.** It exists to find pockets when you do not know where they are; every benchmark complex ships a bound ligand, so the pocket centre is the ligand centroid and the segmentation step falls away. Point this at apo structures and you will need p2rank back.
+
+### Build
+
+```bash
+podman build --format=docker -t tankbind:latest .                              # reference: torchdrug, py3.8
+podman build --format=docker -f Containerfile.gpu -t tankbind-torch:latest .   # clean stack
+```
+
+### Run
+
+```bash
+# tankbind.reference — localhost/tankbind:latest
+# source: models/tankbind
+
+# embed
+podman run --rm \
+    --network=none --read-only \
+    --tmpfs /tmp:rw,size=2g \
+    -v /path/to/complexes:/data:ro \
+    -v /path/to/outputs:/outputs:rw,U \
+    -v "$PWD/saved_models:/ckpt:ro" \
+    localhost/tankbind:latest \
+    sh -c 'cd /tmp && python /work/embed_complexes.py --complexes /data --model /ckpt/self_dock.pt --out /outputs/embeddings.npz --workdir /outputs/work --device cpu'
+```
+
+```bash
+# tankbind.torch — localhost/tankbind-torch:latest
+# source: models/tankbind
+
+# predict
+podman run --rm \
+    --network=none --read-only \
+    --tmpfs /tmp:rw,size=2g \
+    -v /path/to/complexes:/data:ro \
+    -v /path/to/outputs:/outputs:rw,U \
+    -v "$PWD/saved_models:/ckpt:ro" \
+    localhost/tankbind-torch:latest \
+    sh -c 'cd /tmp && python /work/embed_complexes.py --complexes /data --model /ckpt/self_dock.pt --out /outputs/embeddings.npz --workdir /outputs/work --predict /outputs/predictions.csv --device cpu'
+
+# embed
+podman run --rm \
+    --network=none --read-only \
+    --tmpfs /tmp:rw,size=2g \
+    -v /path/to/complexes:/data:ro \
+    -v /path/to/outputs:/outputs:rw,U \
+    -v "$PWD/saved_models:/ckpt:ro" \
+    localhost/tankbind-torch:latest \
+    sh -c 'cd /tmp && python /work/embed_complexes.py --complexes /data --model /ckpt/self_dock.pt --out /outputs/embeddings.npz --workdir /outputs/work --device cpu'
+
+# train
+podman run --rm \
+    --network=none --read-only \
+    --tmpfs /tmp:rw,size=2g \
+    -v /path/to/complexes:/data:ro \
+    -v /path/to/outputs:/outputs:rw,U \
+    -v "$PWD/saved_models:/ckpt:ro" \
+    -v /path/to/splits:/splits:ro \
+    -v /path/to/cache:/cache:rw,U \
+    --shm-size 4g \
+    localhost/tankbind-torch:latest \
+    sh -c 'cd /tmp && python /work/train_complexes.py --complexes /data --labels /splits/train.csv --out /outputs --seed 0 --device cpu --val-labels /splits/val.csv --cache /cache --epochs 30'
+
+# finetune  (encoder frozen; drop --freeze-encoder to tune all of it)
+podman run --rm \
+    --network=none --read-only \
+    --tmpfs /tmp:rw,size=2g \
+    -v /path/to/complexes:/data:ro \
+    -v /path/to/outputs:/outputs:rw,U \
+    -v "$PWD/saved_models:/ckpt:ro" \
+    -v /path/to/splits:/splits:ro \
+    -v /path/to/cache:/cache:rw,U \
+    --shm-size 4g \
+    localhost/tankbind-torch:latest \
+    sh -c 'cd /tmp && python /work/train_complexes.py --complexes /data --labels /splits/train.csv --out /outputs --seed 0 --device cpu --val-labels /splits/val.csv --cache /cache --epochs 30 --init-encoder /ckpt/encoder.pt --freeze-encoder'
+```
+
+### What comes out
+
+| file | holds |
+|---|---|
+| `embeddings.npz` | `ids` and `vectors`, 128-dim — a masked mean over the interaction tensor, the authors' own `readout_mode == 1` formula |
+| `predictions.csv` | `complex_id,y_pred` from the affinity head, with `--predict` |
+| `work/` | the processed dataset PyG caches; reuse it between runs |
+
+### Before you trust the numbers
+
+**The clean tier is not bit-identical to the reference one, and the difference is measured.** `torch_cluster`'s `knn_graph` returns each node's neighbours in neither distance nor index order — a heap artefact with no rule to reproduce — so `tankbind/torch_ops.py` returns a canonical order instead and prefers the extension wherever it is installed. `compare_knn_graph.py` shows the edge *set* is identical on every backbone tested; only a handful of rows are ordered differently. Five rounds of triangle attention turn that into a median embedding difference of 4.5e-08 and a maximum of 1.1e-02, with CASF Pearson R unchanged to six decimal places.
+
+Affinity comes from a native pocket here, which is an easier question than the published protocol asks.
+
 <!-- gnn-benchmark:end -->
 
 ---

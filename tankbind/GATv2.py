@@ -5,8 +5,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils import checkpoint
-from torch_scatter import scatter_mean, scatter_add, scatter_max
-from torch_scatter import scatter_add, scatter_mean
+# torch_geometric instead of torch_scatter — see torch_ops.py for the two API differences
+# that make this a rewrite rather than a rename. The duplicate import line here was the
+# authors'; one is enough.
+from torch_ops import scatter_add, scatter_max, scatter_mean
 from collections.abc import Sequence
 
 class _ScatterReadout(nn.Module):

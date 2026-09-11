@@ -38,25 +38,23 @@ RUN micromamba install -y -n base -c conda-forge \
 ENV PATH=/opt/conda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/conda/lib
 
-RUN pip install --no-cache-dir torch==2.1.2
+RUN pip install --no-cache-dir torch==2.5.1
 
-# setuptools<81 guards torch 2.1.2's cpp_extension.py, which still does
-# `from pkg_resources import packaging`; setuptools 81 removed pkg_resources. Nothing here
-# compiles an extension any more now that torchdrug is gone, so this is defensive rather
-# than load-bearing — but anything importing torch.utils.cpp_extension would hit it.
-RUN pip install --no-cache-dir "setuptools<81" wheel
-
-RUN pip install --no-cache-dir "torch_geometric<2.6" \
-    && pip install --no-cache-dir torch_scatter torch_sparse torch_cluster \
-        -f https://data.pyg.org/whl/torch-2.1.0+cu121.html \
-        -f https://data.pyg.org/whl/torch-2.1.2+cu121.html
-
-# torch_scatter without CUDA kernels imports cleanly and fails only once a batch reaches the
-# GPU, so check at build time rather than discovering it in a run.
-RUN python -c "import glob, os, torch_scatter; \
-d = os.path.dirname(torch_scatter.__file__); \
-assert glob.glob(os.path.join(d, '_scatter_cuda*')), 'torch_scatter has no CUDA extension'; \
-print('torch_scatter CUDA extension present')"
+# **No compiled PyG extensions, and therefore no torch pin.** torch_scatter, torch_sparse and
+# torch_cluster used to come from a per-torch wheel index here, which is what held this tier at
+# 2.1.2: each is built against one torch ABI, so the image could only ever be as new as the
+# last published wheel. PyG dropped the hard dependency in 2.4.
+#
+# Only `torch_scatter` was ever on the code path — `gvp/__init__.py`, `GATv2.py`, `GINv2.py`
+# and an unused import in `model.py`. All four now go through `tankbind/scatter_ops.py`, which
+# wraps `torch_geometric.utils.scatter` and reproduces `scatter_max`'s tuple return. The other
+# two were pulled in by PyG opportunistically, never by this port.
+#
+# `torch_cluster` is still imported by `gvp/data.py` and `gvp/atom3d.py`. Neither is on any
+# path this benchmark uses — importing `model` loads `gvp` and nothing under it — so they are
+# left as the authors wrote them and are simply not importable here. They implement atom3d
+# benchmarks, not TankBind.
+RUN pip install --no-cache-dir torch_geometric
 
 # No torchdrug. It used to be here for one call — `td.Molecule.from_smiles(...)` in
 # feature_utils — plus two readouts and an MLP. All four are reimplemented in
@@ -77,6 +75,9 @@ COPY . /work
 # port is a silently different feature space. 21/56 is what torchdrug 0.1.2 produced and what
 # the published weights expect.
 RUN python -c "import torch, torch_geometric, atom3d, sys; sys.path.insert(0, '/work'); \
+import importlib.util as u; \
+assert u.find_spec('torch_scatter') is None, 'torch_scatter crept back in'; \
+assert u.find_spec('torch_sparse') is None, 'torch_sparse crept back in'; \
 from rdkit import Chem; from tankbind_features import molecule_features; \
 n, _e, _w, f = molecule_features('CCO'); \
 assert (f.shape[-1], n.shape[-1]) == (21, 56), f'features are {f.shape[-1]}/{n.shape[-1]}, expected 21/56'; \
