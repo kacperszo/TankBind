@@ -81,6 +81,56 @@ The git history rules out the obvious suspect: weights uploaded 2022-05-25 with
 `conda install torchdrug` unpinned, and `df47d7f` pinned 0.1.2 two weeks later. The pin was never
 the problem — RDKit moved underneath both.
 
+## The clean stack, and the one number it moved
+
+Settled 2026-09-11. This tier ran torch 2.1.2 because `torch_scatter`, `torch_sparse` and
+`torch_cluster` came from a per-torch wheel index — each links against one torch ABI, so the
+index was the pin. `tankbind/torch_ops.py` replaces the four functions actually used and
+**prefers the extension wherever it is installed**, so the reference tier stays bit-for-bit
+while this one runs torch 2.5.1 with nothing compiled.
+
+| what was used | where | replacement | cost |
+|---|---|---|---|
+| `scatter_mean/add/max` | `gvp/__init__.py`, `GATv2.py`, `GINv2.py` | `torch_geometric.utils.scatter` | none, bit-identical |
+| `knn_graph` | `gvp/data.py` | dense `cdist` + stable `topk` | see below |
+| `torch_sparse`, `torch_cluster` elsewhere | pulled in by PyG, never by this port | none needed | none |
+
+`model.py` also imported `scatter_mean` and never used it.
+
+**`knn_graph` is the one thing that could not be made identical, and the reason is worth
+knowing.** `torch_cluster`'s version returns each node's neighbours in neither distance nor
+index order — on 1bcu node 185 it puts a neighbour at distance 3.811748 *ahead* of one at
+3.811731. That is a heap artefact, not a rule, so there is nothing to reproduce. It also drops
+non-finite points from both the query and the candidate set, which matters because
+`gvp/data.py` sets incomplete backbones to infinity first; missing that gave 1gpk 15871 edges
+against 15840.
+
+`compare_knn_graph.py` settles the rest: on all eight CASF backbones tested the **edge set is
+identical** and only a handful of rows are ordered differently — 2 of 8250 on 1bcu, 8 of 31920
+on 1e66. Float summation is not associative, and five rounds of triangle attention turn that
+into:
+
+| | |
+|---|---|
+| embeddings, median abs diff | 4.5e-08 |
+| embeddings, p99 / max | 2.9e-05 / **1.1e-02** |
+| affinity, median / max abs diff | 0 / 1.7e-03 |
+| CASF Pearson R | **0.820826 either way** |
+
+Isolated by changing one thing at a time: the same source on the old stack reproduces the same
+residual, so it is not the torch bump; reverting `knn_graph` alone returns the pre-existing
+2.9e-06. `tankbind.torch` declares `tolerance = 0.02` and the registry entry explains why.
+
+`test_invariance.py` checks the property the rewrite could have broken rather than only the
+golden: rotating and translating a complex leaves the embedding alone to **1.6e-05** on vectors
+of norm 25-35. Every feature is a distance, a dihedral or a local frame, so invariance is the
+model's own property — which is what makes it a check on the port.
+
+```bash
+python test_invariance.py --complexes /data --model /ckpt/self_dock.pt --n 2 --trials 2
+python compare_knn_graph.py --complexes /data --check knn_reference.npz
+```
+
 ## Hard-won environment facts (do NOT regress these)
 
 - **`mkl<2024` is pinned on purpose.** MKL 2024.1+ removes the symbol `iJIT_NotifyEvent`, which
