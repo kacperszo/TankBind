@@ -20,10 +20,11 @@ the authors' own `readout_mode == 1` formula, a masked mean.
 
 | | |
 |---|---|
-| CASF-2016 scoring | **R 0.821**, RMSE 1.285, n=285 — highest in the roster |
-| CASF-2016 ranking | **rho 0.681** — also highest |
-| embedding | 128d, the authors' formula, probe R 0.762 — 93% of its own head |
-| `gnnb verify` | reference 0.0; port 1.1e-02 embed, 1.7e-03 predict (tolerance 0.02) |
+| CASF-2016 scoring | **R 0.852**, RMSE 1.141, n=285 — highest in the roster |
+| CASF-2016 ranking | **rho 0.714** |
+| embedding | 128d, the authors' formula, probe R 0.781 — 92% of its own head |
+| `gnnb verify` | reference 0.0; port 1.1e-02 embed, 0.0 predict (tolerance 0.02) |
+| ligand input | a fresh RDKit conformer, as in the authors' test protocol; the crystal pose gave R 0.821 |
 | invariance | rotation and translation, to 1.6e-05 |
 
 **The affinity is scored against a native pocket** — the ligand centroid, no p2rank — which is an

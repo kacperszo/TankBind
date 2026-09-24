@@ -20,6 +20,23 @@ head does not use it — but it is the most defensible aggregation available.
 Every benchmark complex ships a bound ligand, so the pocket centre is the ligand centroid and
 the whole segmentation step falls away.
 
+**The ligand is a fresh RDKit conformer, as in the authors' test protocol.** Featurising the
+*crystal* ligand instead hands TankBind the bound pose's intra-ligand distance distribution, and
+the authors never do that at test time:
+`examples/testset_evaluation_cleaned.ipynb` (cell 3) takes the SMILES of the crystal ligand,
+generates a fresh RDKit conformer, and featurises that — the crystal pose is seen only in
+training. `--ligand-conformer rdkit` reproduces their protocol, with one addition: their
+`generate_conformation` passes no seed to ETKDG, so their test features change between runs, and
+here `--conformer-seed` fixes it. The pocket centre is the crystal ligand's centroid either way,
+since p2rank is not used.
+
+Measured on CASF-2016 on 2026-09-24, over three independent seeds (0, 2 and 3 — RDKit's seeds 0
+and 1 produce byte-identical conformers): the affinity head scores **R 0.852 ± 0.0004** on RDKit
+conformers against **0.821** on the crystal pose, and a ridge on the frozen embedding **0.783**
+against **0.762**. The model does better on the input it was evaluated on, despite being told less.
+This became the default then; `--ligand-conformer crystal` gives the earlier behaviour. Training
+(`train_complexes.py`) featurises the crystal ligand, as the authors' training set does.
+
 **`--predict` writes the affinity head's output too.** TankBind has one — `affinity_pred`, the
 second return value of `forward` — and until a trainer existed there was nothing to do with it,
 so this script ignored it. Now that `train_complexes.py` fits that head, a run has to be able to
@@ -49,7 +66,8 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tankbi
 
 from data import TankBind_prediction  # noqa: E402
 from feature_utils import (extract_torchdrug_feature_from_mol,  # noqa: E402
-                           get_clean_res_list, get_protein_feature)
+                           get_clean_res_list, get_protein_feature, write_with_new_coords)
+from rdkit.Chem import AllChem  # noqa: E402
 from model import get_model  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
@@ -68,6 +86,37 @@ def read_ligand(complex_dir: str, cid: str):
         if mol is not None:
             return mol
     raise ValueError("no readable ligand")
+
+
+def rdkit_conformer(crystal, cid: str, workdir: str, seed: int):
+    """The authors' test-time ligand: a fresh RDKit conformer from the crystal ligand's SMILES.
+
+    `feature_utils.generate_sdf_from_smiles_using_rdkit` with `shift_dis=0`, as their
+    testset_evaluation_cleaned.ipynb calls it, and then their `read_mol`'s steps on the result —
+    the sdf round trip is theirs and is kept, because re-reading can perceive a molecule
+    differently from the object that was written. The only change is `randomSeed`: their
+    `generate_conformation` builds `ETKDGv2()` with none, so it is not reproducible.
+    """
+    smiles = Chem.MolToSmiles(crystal)
+    mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    params = AllChem.ETKDGv2()
+    params.randomSeed = seed
+    try:
+        AllChem.EmbedMolecule(mol, params)
+        AllChem.MMFFOptimizeMolecule(mol, maxIters=500, confId=0)
+    except Exception:
+        mol.Compute2DCoords()
+    mol = Chem.RemoveHs(mol)
+    path = os.path.join(workdir, f"{cid}_ligand_from_rdkit.sdf")
+    write_with_new_coords(mol, mol.GetConformer().GetPositions(), path)
+    # feature_utils.read_mol's reading steps, without its first line: it opens with
+    # Chem.WrapLogs(), which only redirects RDKit's warnings and no longer exists in the RDKit
+    # this tier runs. What it does to the molecule is exactly this.
+    reread = Chem.MolFromMolFile(path, sanitize=False)
+    if reread is None:
+        raise ValueError("the RDKit conformer could not be read back")
+    Chem.SanitizeMol(reread)
+    return Chem.RemoveHs(reread)
 
 
 # RDKit 2023.09 added STEREOATROPCW and STEREOATROPCCW to BondStereo, taking the enum from
@@ -118,10 +167,20 @@ def main() -> None:
     parser.add_argument("--predict", default=None,
                         help="also write complex_id,y_pred here, from the affinity head")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--ligand-conformer", choices=["crystal", "rdkit"], default="rdkit",
+                        help="a fresh RDKit conformer, as the authors' test protocol does "
+                             "(default), or the bound pose — see the module docstring")
+    parser.add_argument("--conformer-seed", type=int, default=0,
+                        help="ETKDG seed for --ligand-conformer rdkit")
     args = parser.parse_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
     parser_pdb = PDBParser(QUIET=True)
+    # Its own subdirectory: args.workdir is also TankBind_prediction's dataset root, and the
+    # conformer files are written before that dataset exists.
+    conformer_dir = os.path.join(args.workdir, "rdkit_ligands")
+    if args.ligand_conformer == "rdkit":
+        os.makedirs(conformer_dir, exist_ok=True)
 
     ids = sorted(d for d in os.listdir(args.complexes)
                  if os.path.isdir(os.path.join(args.complexes, d)))
@@ -135,8 +194,11 @@ def main() -> None:
             protein_dict[cid] = get_protein_feature(res_list)
 
             mol = read_ligand(d, cid)
+            featurised = mol
+            if args.ligand_conformer == "rdkit":
+                featurised = rdkit_conformer(mol, cid, conformer_dir, args.conformer_seed)
             coords, node_f, edge_list, edge_f, pair_dis = extract_torchdrug_feature_from_mol(
-                mol, has_LAS_mask=True)
+                featurised, has_LAS_mask=True)
             compound_dict[cid] = (coords, node_f, edge_list,
                                   trim_bond_features(edge_f), pair_dis)
 

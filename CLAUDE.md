@@ -8,10 +8,17 @@ left off.
 
 ## Current state
 
-Done for `embed`: 285 of 285 CASF-2016 core-set complexes, **probe R 0.762** against a
-heavy-atom-count baseline of 0.470.
+Done for `embed` and `predict`: 285 of 285 CASF-2016 core-set complexes. The affinity head
+scores **R 0.852**, and a ridge on the frozen embedding **probe R 0.781**, against a heavy-atom
+count baseline of 0.470.
 
-`predict` is not registered — the affinity path was not pursued.
+**The ligand is a fresh RDKit conformer, as in the authors' test protocol**
+(`examples/testset_evaluation_cleaned.ipynb`, cell 3); they only ever show the model a crystal
+pose in training. Until 2026-09-24 this fork fed the crystal ligand instead, which gave R 0.821
+and probe 0.762 — lower, although the model was told more. Three conformer seeds agree to
+±0.0004. `embed_complexes.py --ligand-conformer crystal` restores the old input. The pocket
+centre is still the crystal ligand's centroid rather than p2rank's pockets, which remains an easier
+setting than theirs.
 
 Two tiers, and the modern one is now the default place to run this:
 
