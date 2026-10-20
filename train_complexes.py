@@ -18,7 +18,8 @@ which penalises decoy pockets asymmetrically — with `mask` all true it *is* MS
 
 **Every pocket is native, and that is a real difference from their training.** p2rank is not
 run: each complex ships its bound ligand, so the pocket centre is the ligand centroid and
-`use_compound_com` is true throughout. TankBind's affinity head was trained to rank the native
+`use_compound_com` is true during training. Validation uses a fresh RDKit conformer
+and the rounded crystal pocket centre, matching inference, and scores affinity only. TankBind's affinity head was trained to rank the native
 pocket above decoys, and nothing here presents it with a decoy. A model trained this way is
 being asked an easier question than the published one.
 
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -55,20 +57,16 @@ from feature_utils import (extract_torchdrug_feature_from_mol,  # noqa: E402
                            get_clean_res_list, get_protein_feature)
 from model import get_model  # noqa: E402
 
-from embed_complexes import read_ligand, trim_bond_features  # noqa: E402
+from embed_complexes import read_ligand, rdkit_conformer, trim_bond_features  # noqa: E402
 from transfer import set_training_mode, transfer_encoder  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
 warnings.filterwarnings("ignore")
 
 
-def featurise(complexes: str, labels: dict[str, float]):
-    """Complexes to the two dictionaries and the index frame `TankBindDataSet` reads.
-
-    The same featurisation `embed_complexes.py` uses, so a model trained here and a vector read
-    there describe the same input. Divergence between the two would look like a modest,
-    plausible loss of accuracy rather than a bug.
-    """
+def featurise(complexes: str, labels: dict[str, float], *, validation=False,
+              conformer_seed=0, conformer_dir=None):
+    """Crystal training targets; inference-compatible RDKit validation inputs."""
     parser = PDBParser(QUIET=True)
     protein_dict, compound_dict, rows, failed = {}, {}, [], []
 
@@ -84,44 +82,82 @@ def featurise(complexes: str, labels: dict[str, float]):
             protein_dict[cid] = get_protein_feature(res_list)
 
             mol = read_ligand(d, cid)
+            featurised = (rdkit_conformer(mol, cid, str(conformer_dir), conformer_seed)
+                          if validation else mol)
             coords, node_f, edge_list, edge_f, pair_dis = extract_torchdrug_feature_from_mol(
-                mol, has_LAS_mask=True)
+                featurised, has_LAS_mask=True)
             compound_dict[cid] = (coords, node_f, edge_list, trim_bond_features(edge_f), pair_dis)
 
             centre = mol.GetConformer().GetPositions().mean(axis=0)
+            if validation:
+                # Match embed_complexes.py's serialization, including boundary rounding.
+                centre = np.array([float(f"{v:.3f}") for v in centre])
             rows.append({"protein_name": cid, "compound_name": cid, "pdb": cid,
                          "affinity": labels[cid], "pocket_com": centre.reshape(1, 3),
-                         "use_compound_com": True, "group": "train"})
+                         "use_compound_com": not validation,
+                         "group": "valid" if validation else "train"})
         except Exception as e:
             failed.append(f"{cid}: {type(e).__name__}: {e}")
 
     if failed:
-        print(f"{len(failed)} complexes failed to featurise:")
-        for line in failed[:10]:
-            print("  ", line)
+        raise ValueError("requested complexes failed to featurise: " + "; ".join(failed))
     return pd.DataFrame(rows), protein_dict, compound_dict
 
 
-def build_dataset(root: str, complexes: str, labels_path: str):
-    """A `TankBindDataSet` under `root`, reusing what is already processed there.
-
-    `TankBindDataSet` is a PyG `Dataset`, so it caches into `root/processed` on first use and
-    reloads from there afterwards — the caching is theirs, and pointing `root` at /cache is all
-    that is needed to keep it between runs.
-    """
+def read_labels(labels_path):
+    labels = {}
     with open(labels_path) as f:
-        labels = {r["complex_id"]: float(r["y_true"]) for r in csv.DictReader(f)}
+        reader = csv.DictReader(f)
+        if not {"complex_id", "y_true"}.issubset(reader.fieldnames or []):
+            raise ValueError("labels require complex_id,y_true")
+        for row in reader:
+            cid = (row["complex_id"] or "").strip()
+            value = float(row["y_true"])
+            if not cid or Path(cid).name != cid or cid in {".", ".."} or cid in labels:
+                raise ValueError(f"invalid or duplicate complex_id: {cid!r}")
+            if not np.isfinite(value):
+                raise ValueError(f"nonfinite label: {cid}")
+            labels[cid] = value
+    if not labels:
+        raise ValueError("empty labels")
+    return labels
 
-    processed = Path(root) / "processed" / "data.pt"
+
+def cache_identity(complexes, labels, validation, conformer_seed):
+    # A split basename cannot identify its contents or the input protocol. Hash actual
+    # source files too, so replacing coordinates under the same ID cannot reuse features.
+    digest = hashlib.sha256()
+    protocol = {"version": 2, "validation": validation,
+                "conformer_seed": conformer_seed if validation else None,
+                "labels": sorted(labels.items())}
+    digest.update(json.dumps(protocol, sort_keys=True).encode())
+    for cid in sorted(labels):
+        for suffix in ("protein.pdb", "ligand.mol2", "ligand.sdf"):
+            path = Path(complexes) / cid / f"{cid}_{suffix}"
+            digest.update(f"{cid}/{suffix}:".encode())
+            if path.exists():
+                digest.update(hashlib.sha256(path.read_bytes()).digest())
+            else:
+                digest.update(b"absent")
+    return digest.hexdigest()
+
+
+def build_dataset(root: str, complexes: str, labels_path: str, *, validation=False,
+                  conformer_seed=0):
+    labels = read_labels(labels_path)
+    identity = cache_identity(complexes, labels, validation, conformer_seed)
+    root = Path(root) / ("rdkit-val-v2-" if validation else "crystal-train-v2-") / identity
+    processed = root / "processed" / "data.pt"
     if processed.exists():
-        dataset = TankBindDataSet(root)
+        dataset = TankBindDataSet(str(root))
         print(f"reusing {processed}: {len(dataset)} complexes")
         return dataset
-
-    info, protein_dict, compound_dict = featurise(complexes, labels)
-    if info.empty:
-        raise SystemExit(f"nothing featurised for {labels_path}")
-    return TankBindDataSet(root, data=info, protein_dict=protein_dict,
+    conformer_dir = root / "rdkit_ligands"
+    conformer_dir.mkdir(parents=True, exist_ok=True)
+    info, protein_dict, compound_dict = featurise(
+        complexes, labels, validation=validation, conformer_seed=conformer_seed,
+        conformer_dir=conformer_dir)
+    return TankBindDataSet(str(root), data=info, protein_dict=protein_dict,
                            compound_dict=compound_dict)
 
 
@@ -142,15 +178,24 @@ def run_epoch(model, loader, device, optimiser, relative_k, frozen) -> dict:
             # real_y_mask is all-true here — every pocket is the native one — but the mask is
             # applied anyway so this line stays the authors' line rather than a simplification
             # that would quietly be wrong the moment decoys are introduced.
-            mask = data.real_y_mask
-            dis_map, y_masked = data.dis_map[mask], y_pred[mask]
-            contact_loss = (contact_criterion(y_masked, dis_map) if len(dis_map)
-                            else torch.zeros((), device=device))
+            if training:
+                mask = data.real_y_mask
+                dis_map, y_masked = data.dis_map[mask], y_pred[mask]
+                contact_loss = (contact_criterion(y_masked, dis_map) if len(dis_map)
+                                else torch.zeros((), device=device))
+            else:
+                # RDKit coordinates are model inputs, never crystal distance targets.
+                contact_loss = torch.zeros((), device=device)
             affinity_loss = relative_k * affinity_criterion(affinity_pred, data.affinity)
             objective = contact_loss + affinity_loss
+            if not torch.isfinite(objective) or not torch.isfinite(affinity_pred).all():
+                raise ValueError("nonfinite training/validation objective or predictions")
         if training:
             optimiser.zero_grad()
             objective.backward()
+            if any(q.grad is not None and not torch.isfinite(q.grad).all()
+                   for q in model.parameters()):
+                raise ValueError("nonfinite gradient")
             optimiser.step()
 
         batch_n = int(data.affinity.shape[0])
@@ -160,9 +205,11 @@ def run_epoch(model, loader, device, optimiser, relative_k, frozen) -> dict:
         preds.append(affinity_pred.detach().cpu().numpy().ravel())
         trues.append(data.affinity.detach().cpu().numpy().ravel())
 
+    if not n:
+        raise ValueError("empty training/validation loader")
     p, t = np.concatenate(preds), np.concatenate(trues)
     r = float(np.corrcoef(p, t)[0, 1]) if len(p) > 1 and p.std() and t.std() else float("nan")
-    return {"loss": total_affinity / max(n, 1), "contact": total_contact / max(n, 1),
+    return {"loss": total_affinity / max(n, 1), "contact": total_contact / n if training else None,
             "r": r, "rmse": float(np.sqrt(((p - t) ** 2).mean()))}
 
 
@@ -190,9 +237,17 @@ def main() -> int:
                    help="epochs over which relative_k reaches its full value, doubling each "
                         "epoch as relative_k_mode=0 does")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--conformer-seed", type=int, default=0,
+                   help="validation RDKit seed; independent of training seed, matches inference")
     p.add_argument("--device", default="cpu")
     args = p.parse_args()
 
+    if args.epochs < 1 or args.batch_size < 1 or not np.isfinite(args.lr) or args.lr <= 0:
+        p.error("epochs, batch size and learning rate must be positive")
+    if not np.isfinite(args.relative_k) or args.relative_k < 0 or args.warm_up_epochs < 0:
+        p.error("relative-k and warm-up-epochs must be nonnegative and finite")
+    if not 0 <= args.conformer_seed <= 2147483647:
+        p.error("conformer seed must be in [0, 2147483647]")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -201,13 +256,14 @@ def main() -> int:
     train_ds = build_dataset(os.path.join(root, Path(args.labels).stem),
                              args.complexes, args.labels)
     val_ds = (build_dataset(os.path.join(root, Path(args.val_labels).stem),
-                            args.complexes, args.val_labels) if args.val_labels else None)
+                            args.complexes, args.val_labels, validation=True,
+                            conformer_seed=args.conformer_seed) if args.val_labels else None)
     print(f"{len(train_ds)} training complexes"
           + (f", {len(val_ds)} validation" if val_ds else ""))
 
     follow = ["x", "compound_pair"]
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, follow_batch=follow)
-    val_dl = (DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, follow_batch=follow)
+    val_dl = (DataLoader(val_ds, batch_size=1, shuffle=False, follow_batch=follow)
               if val_ds else None)
 
     model = get_model(0, logging.getLogger("tankbind"), device)
@@ -273,6 +329,12 @@ def main() -> int:
         "epochs": len(history), "best_epoch": best_epoch, "best_score": best,
         "selected_on": "val_affinity_mse" if val_dl else "train_affinity_mse",
         "train_complexes": len(train_ds), "val_complexes": len(val_ds) if val_ds else 0,
+        "training_ligand_conformer": "crystal",
+        "validation_ligand_conformer": "rdkit" if val_dl else None,
+        "validation_conformer_seed": args.conformer_seed if val_dl else None,
+        "validation_objective": "affinity MSE only; no RDKit distance target",
+        "validation_batch_size": 1,
+        "cache_protocol_version": 2,
         "seed": args.seed, "freeze_encoder": args.freeze_encoder,
         "lr": args.lr, "batch_size": args.batch_size,
         "relative_k": args.relative_k, "warm_up_epochs": args.warm_up_epochs,

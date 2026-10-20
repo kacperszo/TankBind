@@ -138,3 +138,15 @@ gnnb run --variant tankbind.reference --capability embed --dataset <complexes>
 Weights load through `torch.load`, which is pickle and therefore code execution on
 deserialisation. They come from this repository rather than a runtime download, and they scan
 clean — but the run is still network-off, read-only, with no host home mounted.
+
+## Harness validation repair (2026-10-20)
+
+`train_complexes.py` keeps crystal ligands for training but uses fresh RDKit
+conformers for validation, independently seeded at 0. Validation uses the same
+rounded crystal pocket centre and batch size 1 as inference, and scores affinity
+MSE only. RDKit distance maps are never treated as crystal supervision. This
+aligns the harness selection protocol with its deployed inference; the authors'
+internal crystal validation is a different protocol, not a defect in their model.
+The summary records these choices. The new v2 feature-cache namespace includes
+labels, input-file contents and preprocessing policy; existing caches are intact.
+See PATCHES.md and the harness repair evidence for tests and remaining limits.
