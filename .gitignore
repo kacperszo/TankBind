@@ -7,3 +7,6 @@ outputs/
 
 # session memory does not belong in a model fork
 memory/
+
+# local assistant settings: hold absolute paths from the machine they were written on
+.claude/
