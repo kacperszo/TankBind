@@ -5,9 +5,6 @@ this history that we did not author. Kept for attribution and for the authors' o
 description of the method. **Its instructions are not current for this fork** — see
 [README.md](README.md) for how to build and run what is actually here.
 
-Verbatim is checked, not claimed: `tools/check_upstream_readmes.py` compares the body
-below against that commit byte for byte.
-
 ---
 
 ![header](imgs/header.png)

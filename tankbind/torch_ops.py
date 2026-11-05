@@ -2,8 +2,7 @@
 
 Three functions came from `torch_scatter` and one from `torch_cluster`. Both are extensions
 built against a single torch ABI, so requiring them pinned this tier to whichever torch their
-wheels were published for — which is what held it at 2.1.2 while the rest of the benchmark
-moved to 2.5.1.
+wheels were published for — which is what held it at 2.1.2 when 2.5.1 was available.
 
 ## The scatter operations
 
@@ -45,8 +44,7 @@ import torch
 # extension there keeps it bit-for-bit what it was, and the replacements below take effect only
 # in the image that has no extensions to fall back on.
 #
-# This is the same shape as IGN's source serving three tiers through fallbacks: pick the
-# behaviour per environment, not per source tree.
+# Pick the behaviour per environment, not per source tree.
 try:
     from torch_scatter import scatter_add as _ext_scatter_add
     from torch_scatter import scatter_max as _ext_scatter_max
@@ -112,8 +110,8 @@ def knn_graph(x: torch.Tensor, k: int, loop: bool = False,
     Affinity moves by a median of exactly zero and at most 1.7e-03, and the CASF Pearson R is
     unchanged to six decimal places at 0.820826.
 
-    That residual is why `tankbind.torch` declares a tolerance in the registry, and why the
-    extension is preferred where it exists: the reference tier stays exact.
+    That residual is why the torch-only tier is compared to the reference at a tolerance of
+    0.02 rather than exactly, and why the extension is preferred where it exists: the reference tier stays exact.
 
     Two details had to be measured rather than assumed, and `compare_knn_graph.py` is what
     measured them against the extension on real backbones:

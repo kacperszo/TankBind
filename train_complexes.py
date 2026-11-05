@@ -2,7 +2,7 @@
 
 The authors' `tankbind/main.py` trains this model and stays the reference for what training
 means here. What it wants is their preprocessed dataset — decoy pockets from p2rank, a sampled
-subset per epoch, warm-up phases — and what the harness hands a trainer is a directory of
+subset per epoch, warm-up phases — and what a trainer here is handed is a directory of
 complexes and a csv of labels. So the *data* comes from `embed_complexes.py`'s featurisation
 and the *loss* comes from theirs, unchanged:
 
@@ -226,7 +226,7 @@ def main() -> int:
     p.add_argument("--init-weights", dest="init_weights", default=None,
                    help="start from a published checkpoint rather than from scratch")
     p.add_argument("--init-encoder", dest="init_encoder", default=None,
-                   help="encoder .pt from `gnnb encoder split`")
+                   help="encoder-only .pt (no head tensors)")
     p.add_argument("--freeze-encoder", dest="freeze_encoder", action="store_true")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch_size", type=int, default=8, help="the authors' own")

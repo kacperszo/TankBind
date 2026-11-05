@@ -1,9 +1,9 @@
 """Move a trained encoder into a fresh TankBind, and freeze it if asked.
 
-The harness cuts checkpoints (`gnnb encoder split`); this loads one back, which needs the model
-class and so lives here.
+Cutting a checkpoint into encoder and head needs no model code; loading one back does, so it
+lives here.
 
-**Where TankBind's boundary is, and why the registry had it wrong.** `forward` returns two
+**Where TankBind's boundary is, and why the boundary is where it is.** `forward` returns two
 things and there are therefore two heads:
 
     b = self.linear(z);            y_pred = b[z_mask].sigmoid() * 10        the distance map
@@ -26,8 +26,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-#: The two output heads, by parameter-name prefix. Must agree with `encoder.head` for the
-#: tankbind variants in harness/registry.toml.
+#: The two output heads, by parameter-name prefix. Everything else is the
+#: encoder.
 #:
 #: `linear` and `linear_energy` are two different modules, and only the module-boundary match
 #: below tells them apart — a raw string prefix would make `linear` swallow `linear_energy`,
@@ -60,7 +60,7 @@ def transfer_encoder(model: nn.Module, path: str, freeze: bool = False) -> dict[
     if head_keys:
         raise SystemExit(
             f"{path} carries {len(head_keys)} head tensors ({head_keys[:3]}). That is a whole "
-            f"checkpoint, not an encoder — cut it with `gnnb encoder split` first."
+            f"checkpoint, not an encoder — pass a file holding encoder tensors only."
         )
     unknown = [k for k in encoder if k not in target]
     if unknown:
@@ -103,7 +103,7 @@ def set_training_mode(model: nn.Module, training: bool, frozen_encoder: bool) ->
     TankBind's trigonometry stack is wrapped in `nn.Dropout2d(p=0.25)` at every one of the five
     rounds, so leaving it in train mode means the heads learn against a representation resampled
     each step — a quarter of the interaction tensor zeroed differently every time. That is a
-    different experiment from the one `gnnb probe` measures.
+    different experiment from a linear probe on the frozen embedding.
     """
     if not training or not frozen_encoder:
         model.train(training)

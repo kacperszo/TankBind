@@ -1,13 +1,14 @@
-# TankBind on the GPU — the one model here that could not simply be given a CUDA wheel.
+# TankBind on the GPU — this model could not simply be given a CUDA wheel.
 #
 # The CPU tier pins pytorch 1.13.1 and python 3.8 because torchdrug 0.1.2 does. torch 1.13's
-# cu117 build predates Ada and ships no sm_89 kernels, so on the local RTX 4060 Ti it does not
+# cu117 build predates Ada and ships no sm_89 kernels, so on an Ada card (sm_89) it does not
 # run at all — this was a port, not a rebuild.
 #
 # What moved:
 #   python 3.8 -> 3.10              3.8 is EOL
-#   pytorch 1.13.1 -> 2.1.2+cu121   first line with native sm_86 and sm_89 support
-#   pyg 2.1.0 -> 2.5.x              2.1.0 has no wheels for torch 2.1
+#   pytorch 1.13.1 -> 2.5.1         2.1.x was the first line with native sm_86 and sm_89 support;
+#                                   2.5.1 became possible once the compiled PyG extensions went
+#   pyg 2.1.0 -> current            2.1.0 has no wheels for torch 2.x
 #   torchdrug -> removed entirely   see below
 #
 # torchdrug was what welded the old pins together: `feature_utils.py` built the ligand
@@ -51,9 +52,9 @@ RUN pip install --no-cache-dir torch==2.5.1
 # two were pulled in by PyG opportunistically, never by this port.
 #
 # `torch_cluster` is still imported by `gvp/data.py` and `gvp/atom3d.py`. Neither is on any
-# path this benchmark uses — importing `model` loads `gvp` and nothing under it — so they are
+# path this model uses — importing `model` loads `gvp` and nothing under it — so they are
 # left as the authors wrote them and are simply not importable here. They implement atom3d
-# benchmarks, not TankBind.
+# tasks, not TankBind.
 RUN pip install --no-cache-dir torch_geometric
 
 # No torchdrug. It used to be here for one call — `td.Molecule.from_smiles(...)` in

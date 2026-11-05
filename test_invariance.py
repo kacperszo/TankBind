@@ -8,9 +8,9 @@ therefore a useful check on the *port*. If a coordinate leaked into a feature di
 axis got transposed while every shape stayed right, the embedding would move here and nowhere
 else.
 
-This matters more for TankBind than for its neighbours. Removing `torch_cluster` meant
-reimplementing `knn_graph`, and that rewrite is the one change in the roster that moved a number
-against the golden file. A bit-identical golden would have settled the question on its own; a
+This matters here in particular. Removing `torch_cluster` meant
+reimplementing `knn_graph`, and that rewrite is the one change that moved a number against the
+stored reference embeddings. A bit-identical match would have settled the question on its own; a
 moved one cannot, so the property gets checked directly.
 
 Expect small deviations rather than zero, and the reason is worth knowing: the pocket is selected

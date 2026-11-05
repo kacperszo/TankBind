@@ -17,7 +17,7 @@ choice of width. This is still recorded as `defined` rather than `native`, becau
 head does not use it — but it is the most defensible aggregation available.
 
 **p2rank is not needed here.** It exists to find pockets when you do not know where they are.
-Every benchmark complex ships a bound ligand, so the pocket centre is the ligand centroid and
+Every evaluation complex ships a bound ligand, so the pocket centre is the ligand centroid and
 the whole segmentation step falls away.
 
 **The ligand is a fresh RDKit conformer, as in the authors' test protocol.** Featurising the

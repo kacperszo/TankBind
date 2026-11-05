@@ -136,7 +136,7 @@ def _():
         assert all(not p.requires_grad for n, p in model.named_parameters() if not is_head(n))
         assert all(p.requires_grad for n, p in model.named_parameters() if is_head(n))
         set_training_mode(model, training=True, frozen_encoder=True)
-        # LayerNorm keeps no running statistics, so unlike EquiBind there are no buffers to
+        # LayerNorm keeps no running statistics, so there are no buffers to
         # drift here — the eval mode is for the five Dropout2d layers in the trigonometry stack,
         # which would otherwise resample the representation the heads are fitted on.
         assert not model.tranistion.training, "the encoder is still sampling dropout"
